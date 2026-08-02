@@ -59,6 +59,10 @@ jobs:
         working-directory: engine/${{ matrix.engine }}
         run: pip install -r requirements-dev.txt
 
+      - name: Install dependencies
+        working-directory: engine/${{ matrix.engine }}
+        run: pip install -e
+
       - name: Run tests
         working-directory: engine/${{ matrix.engine }}
         run: pytest -q
