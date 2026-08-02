@@ -27,7 +27,7 @@ class _FakeHttpClient:
         self._post_response = post_response
         self._get_responses = get_responses or {}
 
-    async def post(self, url, json=None):
+    async def post(self, url, json=None, headers=None):
         return self._post_response
 
     async def get(self, url, params=None):
