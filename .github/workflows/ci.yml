@@ -55,16 +55,16 @@ jobs:
           cache: pip
           cache-dependency-path: engine/${{ matrix.engine }}/requirements-dev.txt
 
-      - name: Install dependencies
+      - name: Install dependencies and package
         working-directory: engine/${{ matrix.engine }}
-        run: pip install -r requirements-dev.txt
+        run: |
+         python -m pip install --upgrade pip
+         python -m pip install -r requirements-dev.txt
+         python -m pip install -e .
 
-      - name: Install dependencies
-        working-directory: engine/${{ matrix.engine }}
-        run: pip install -e
 
       - name: Run tests
         working-directory: engine/${{ matrix.engine }}
         env:
-          PYTHONPATH: github.workspace / engine / {{ matrix.engine }}
+          PYTHONPATH: ${{ github.workspace }}/engine/${{ matrix.engine }}
         run: pytest -q
