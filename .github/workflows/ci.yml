@@ -65,4 +65,6 @@ jobs:
 
       - name: Run tests
         working-directory: engine/${{ matrix.engine }}
+        env:
+          PYTHONPATH: github.workspace / engine / {{ matrix.engine }}
         run: pytest -q
