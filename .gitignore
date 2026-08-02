@@ -1,0 +1,15 @@
+target/
+build/
+*.class
+.idea/
+*.iml
+.vscode/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.log
+node_modules/
+.DS_Store
+chaos/results/*.json

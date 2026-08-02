@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIC Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Autonomous Incident Commander</h1>
+    <div class="status-line">
+      <span id="conn-causal" class="pill pill-unknown">causal-analysis-engine</span>
+      <span id="conn-incident" class="pill pill-unknown">incident-store</span>
+      <button id="refresh-btn">Refresh now</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="anomalies-section" class="panel">
+      <h2>Live service health</h2>
+      <table id="anomalies-table">
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>Req/s</th>
+            <th>Error rate</th>
+            <th>Latency ratio</th>
+            <th>Status</th>
+            <th>Reasons</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="two-col">
+      <section id="incidents-section" class="panel">
+        <h2>Incidents</h2>
+        <table id="incidents-table">
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Status</th>
+              <th>Top root cause</th>
+              <th>Events</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section id="detail-section" class="panel">
+        <h2>Incident detail</h2>
+        <div id="detail-empty">Select an incident to view its timeline and postmortem.</div>
+        <div id="detail-content" class="hidden">
+          <h3>Timeline</h3>
+          <table id="timeline-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Time</th>
+                <th>Event</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <h3>Postmortem</h3>
+          <pre id="postmortem-view"></pre>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

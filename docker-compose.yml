@@ -1,0 +1,369 @@
+name: aic
+
+networks:
+  aic-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:
+
+services:
+  # ---------- Data stores ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: aic-postgres
+    environment:
+      POSTGRES_DB: aic
+      POSTGRES_USER: aic
+      POSTGRES_PASSWORD: aic
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aic -d aic"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [aic-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: aic-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [aic-net]
+
+  # ---------- Messaging (Kafka, KRaft combined mode, no Zookeeper) ----------
+  kafka:
+    image: apache/kafka:latest
+    container_name: aic-kafka
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # timeout is generous because kafka-topics.sh launches its own JVM, which
+      # can be slow to spin up on a host that's also building/starting several
+      # other services' containers concurrently.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 30s
+      retries: 15
+    networks: [aic-net]
+
+  # ---------- Observability ----------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.103.0
+    container_name: aic-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./infra/otel-collector/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "24317:4317"
+      - "24318:4318"
+    depends_on: [tempo]
+    networks: [aic-net]
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: aic-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./infra/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+    networks: [aic-net]
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: aic-loki
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks: [aic-net]
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: aic-promtail
+    command: ["-config.file=/etc/promtail/promtail-config.yaml"]
+    volumes:
+      - ./infra/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    networks: [aic-net]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: aic-prometheus
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [aic-net]
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: aic-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki, tempo]
+    networks: [aic-net]
+
+  # ---------- Microservices ----------
+  gateway:
+    build: ./services/gateway
+    container_name: aic-gateway
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: gateway
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      AUTH_SERVICE_URL: http://auth-service:8081
+      ORDERS_SERVICE_URL: http://orders-service:8082
+    ports:
+      - "8080:8080"
+    depends_on: [auth-service, orders-service, otel-collector]
+    networks: [aic-net]
+
+  auth-service:
+    build: ./services/auth-service
+    container_name: aic-auth-service
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: auth-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/aic?currentSchema=auth
+      SPRING_DATASOURCE_USERNAME: aic
+      SPRING_DATASOURCE_PASSWORD: aic
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_REDIS_HOST: redis
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      otel-collector: { condition: service_started }
+    networks: [aic-net]
+
+  orders-service:
+    build: ./services/orders-service
+    container_name: aic-orders-service
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: orders-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/aic?currentSchema=orders
+      SPRING_DATASOURCE_USERNAME: aic
+      SPRING_DATASOURCE_PASSWORD: aic
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_REDIS_HOST: redis
+      AUTH_SERVICE_URL: http://auth-service:8081
+      INVENTORY_SERVICE_URL: http://inventory-service:8083
+      PAYMENTS_SERVICE_URL: http://payments-service:8084
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      auth-service: { condition: service_started }
+      inventory-service: { condition: service_started }
+      payments-service: { condition: service_started }
+    networks: [aic-net]
+
+  inventory-service:
+    build: ./services/inventory-service
+    container_name: aic-inventory-service
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: inventory-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/aic?currentSchema=inventory
+      SPRING_DATASOURCE_USERNAME: aic
+      SPRING_DATASOURCE_PASSWORD: aic
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_REDIS_HOST: redis
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [aic-net]
+
+  payments-service:
+    build: ./services/payments-service
+    container_name: aic-payments-service
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: payments-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/aic?currentSchema=payments
+      SPRING_DATASOURCE_USERNAME: aic
+      SPRING_DATASOURCE_PASSWORD: aic
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_REDIS_HOST: redis
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+    ports:
+      - "8084:8084"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [aic-net]
+
+  notifications-service:
+    build: ./services/notifications-service
+    container_name: aic-notifications-service
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -javaagent:/otel/opentelemetry-javaagent.jar
+      OTEL_SERVICE_NAME: notifications-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/aic?currentSchema=notifications
+      SPRING_DATASOURCE_USERNAME: aic
+      SPRING_DATASOURCE_PASSWORD: aic
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SPRING_REDIS_HOST: redis
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+    ports:
+      - "8085:8085"
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      auth-service: { condition: service_started }
+      orders-service: { condition: service_started }
+      payments-service: { condition: service_started }
+    networks: [aic-net]
+
+  # ---------- Analysis / remediation engines (Python) ----------
+  causal-analysis-engine:
+    build: ./engine/causal-analysis
+    container_name: aic-causal-analysis-engine
+    environment:
+      TEMPO_URL: http://tempo:3200
+      PROMETHEUS_URL: http://prometheus:9090
+      CORS_ALLOW_ORIGINS: ${DASHBOARD_ORIGIN:-*}
+    ports:
+      - "8090:8090"
+    depends_on:
+      tempo: { condition: service_started }
+      prometheus: { condition: service_started }
+    networks: [aic-net]
+
+  remediation-engine:
+    build: ./engine/remediation
+    container_name: aic-remediation-engine
+    environment:
+      CAUSAL_ANALYSIS_URL: http://causal-analysis-engine:8090
+      REDIS_URL: redis://redis:6379/0
+      CIRCUIT_BREAKER_OWNER_URL: http://orders-service:8082
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+      CORS_ALLOW_ORIGINS: ${DASHBOARD_ORIGIN:-*}
+    ports:
+      - "8091:8091"
+    volumes:
+      # Read-write: this engine restarts containers as a remediation action.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      redis: { condition: service_healthy }
+      causal-analysis-engine: { condition: service_started }
+      orders-service: { condition: service_started }
+    networks: [aic-net]
+
+  incident-store:
+    build: ./engine/incident-store
+    container_name: aic-incident-store
+    environment:
+      CAUSAL_ANALYSIS_URL: http://causal-analysis-engine:8090
+      REMEDIATION_URL: http://remediation-engine:8091
+      DATABASE_URL: postgresql://aic:aic@postgres:5432/aic
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+      CORS_ALLOW_ORIGINS: ${DASHBOARD_ORIGIN:-*}
+    ports:
+      - "8092:8092"
+    depends_on:
+      postgres: { condition: service_healthy }
+      causal-analysis-engine: { condition: service_started }
+      remediation-engine: { condition: service_started }
+    networks: [aic-net]
+
+  # ---------- Dashboard (static UI) ----------
+  dashboard:
+    image: nginx:1.27-alpine
+    container_name: aic-dashboard
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+    ports:
+      - "8095:80"
+    depends_on:
+      causal-analysis-engine: { condition: service_started }
+      incident-store: { condition: service_started }
+    networks: [aic-net]
+

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-java-services:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - gateway
+          - auth-service
+          - orders-service
+          - inventory-service
+          - payments-service
+          - notifications-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: maven
+          cache-dependency-path: services/${{ matrix.service }}/pom.xml
+
+      - name: Build and test
+        working-directory: services/${{ matrix.service }}
+        run: mvn -B -q package
+
+  test-python-engines:
+    name: Test ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine:
+          - causal-analysis
+          - remediation
+          - incident-store
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: engine/${{ matrix.engine }}/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: engine/${{ matrix.engine }}
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        working-directory: engine/${{ matrix.engine }}
+        run: pytest -q
